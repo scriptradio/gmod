@@ -1,0 +1,4 @@
+<resources>
+    <string name="app_name">DeX MicroTouch Bridge</string>
+    <string name="accessibility_service_description">Translates the connected 3M MicroTouch controller into touch gestures on the DeX display.</string>
+</resources>
