@@ -32,6 +32,7 @@ public final class MainActivity extends Activity {
     private TextView status;
     private TextView usbInfo;
     private TextView displayInfo;
+    private TextView shizukuInfo;
     private CheckBox swap;
     private CheckBox invX;
     private CheckBox invY;
@@ -42,23 +43,24 @@ public final class MainActivity extends Activity {
                 UsbDevice d = i.getParcelableExtra(UsbManager.EXTRA_DEVICE);
                 boolean ok = d != null && usb.hasPermission(d);
                 Toast.makeText(MainActivity.this, ok ? "USB permission granted" : "USB permission denied", Toast.LENGTH_SHORT).show();
-                refresh();
-            } else {
-                refresh();
             }
+            refresh();
         }
     };
 
     @Override protected void onCreate(Bundle b) {
         super.onCreate(b);
         usb = (UsbManager)getSystemService(USB_SERVICE);
+        ShizukuShell.init(this);
         buildUi();
+
         IntentFilter f = new IntentFilter();
         f.addAction(USB_ACTION);
         f.addAction(UsbManager.ACTION_USB_DEVICE_ATTACHED);
         f.addAction(UsbManager.ACTION_USB_DEVICE_DETACHED);
         if (Build.VERSION.SDK_INT >= 33) registerReceiver(receiver, f, Context.RECEIVER_NOT_EXPORTED);
         else registerReceiver(receiver, f);
+
         if (Build.VERSION.SDK_INT >= 33 && checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
             requestPermissions(new String[]{Manifest.permission.POST_NOTIFICATIONS}, 4);
         }
@@ -67,6 +69,7 @@ public final class MainActivity extends Activity {
 
     @Override protected void onResume() {
         super.onResume();
+        ShizukuShell.init(this);
         refresh();
     }
 
@@ -83,12 +86,12 @@ public final class MainActivity extends Activity {
         root.setPadding(p,p,p,p);
         sv.addView(root);
 
-        TextView title = t("DeX MicroTouch Bridge", 24);
-        root.addView(title);
-        root.addView(t("3M MicroTouch USB → Samsung DeX touch translator. No root.", 15));
+        root.addView(t("DeX MicroTouch Bridge v0.3", 24));
+        root.addView(t("3M MicroTouch USB → Samsung DeX. v0.3 adds ADB/Shizuku-level input injection for DeX.", 15));
 
         usbInfo = t("", 14);
         displayInfo = t("", 14);
+        shizukuInfo = t("", 14);
         status = t("", 14);
 
         root.addView(t("\n1. USB touchscreen", 18));
@@ -98,15 +101,35 @@ public final class MainActivity extends Activity {
         grant.setOnClickListener(v -> grantUsb());
         root.addView(grant);
 
-        root.addView(t("\n2. Accessibility gesture bridge", 18));
-        Button access = new Button(this);
-        access.setText("Open Accessibility settings");
-        access.setOnClickListener(v -> startActivity(new Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)));
-        root.addView(access);
-        root.addView(t("Enable “DeX MicroTouch Bridge” in Accessibility.", 13));
+        root.addView(t("\n2. Shizuku input injector", 18));
+        root.addView(shizukuInfo);
+        Button shizuku = new Button(this);
+        shizuku.setText("REQUEST / CONNECT SHIZUKU");
+        shizuku.setOnClickListener(v -> {
+            ShizukuShell.requestPermission();
+            refreshDelayed();
+        });
+        root.addView(shizuku);
+        root.addView(t("Shizuku must show Running. On a non-rooted phone it can be started entirely on-device using Android Wireless debugging.", 13));
 
         root.addView(t("\n3. DeX display", 18));
         root.addView(displayInfo);
+
+        Button test = new Button(this);
+        test.setText("TEST CENTER TAP ON DEX");
+        test.setOnClickListener(v -> {
+            Display d = externalDisplay();
+            if (d == null) {
+                Toast.makeText(this, "No DeX display found", Toast.LENGTH_SHORT).show();
+                return;
+            }
+            android.util.DisplayMetrics m = new android.util.DisplayMetrics();
+            d.getRealMetrics(m);
+            boolean ok = ShizukuShell.tap(d.getDisplayId(), m.widthPixels / 2f, m.heightPixels / 2f);
+            Toast.makeText(this, ok ? "Center tap injected" : "Injection failed / Shizuku not ready", Toast.LENGTH_LONG).show();
+            refreshDelayed();
+        });
+        root.addView(test);
 
         root.addView(t("\n4. Orientation", 18));
         swap = new CheckBox(this);
@@ -132,12 +155,13 @@ public final class MainActivity extends Activity {
                     .putBoolean("invy", invY.isChecked())
                     .apply();
             try {
+                ShizukuShell.bind();
                 startForegroundService(new Intent(this, TouchBridgeService.class));
                 Toast.makeText(this, "Bridge starting", Toast.LENGTH_SHORT).show();
             } catch (Exception e) {
                 Toast.makeText(this, e.toString(), Toast.LENGTH_LONG).show();
             }
-            refresh();
+            refreshDelayed();
         });
         root.addView(start);
 
@@ -145,6 +169,13 @@ public final class MainActivity extends Activity {
         stop.setText("STOP");
         stop.setOnClickListener(v -> stopService(new Intent(this, TouchBridgeService.class)));
         root.addView(stop);
+
+        root.addView(t("\nOptional fallback", 18));
+        Button access = new Button(this);
+        access.setText("Open Accessibility settings");
+        access.setOnClickListener(v -> startActivity(new Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)));
+        root.addView(access);
+        root.addView(t("Accessibility injection did not affect DeX on your phone, but remains available as a fallback.", 13));
 
         root.addView(t("\nLive diagnostics", 18));
         root.addView(status);
@@ -155,6 +186,12 @@ public final class MainActivity extends Activity {
         root.addView(refresh);
 
         setContentView(sv);
+    }
+
+    private void refreshDelayed() {
+        refresh();
+        status.postDelayed(this::refresh, 600);
+        status.postDelayed(this::refresh, 1600);
     }
 
     private void grantUsb() {
@@ -180,6 +217,8 @@ public final class MainActivity extends Activity {
 
     private Display externalDisplay() {
         DisplayManager dm = (DisplayManager)getSystemService(DISPLAY_SERVICE);
+        Display[] presentation = dm.getDisplays(DisplayManager.DISPLAY_CATEGORY_PRESENTATION);
+        if (presentation.length > 0) return presentation[0];
         for (Display d : dm.getDisplays()) {
             if (d.getDisplayId() != Display.DEFAULT_DISPLAY) return d;
         }
@@ -199,6 +238,13 @@ public final class MainActivity extends Activity {
                     usb.hasPermission(d) ? "YES" : "NO"));
         }
 
+        shizukuInfo.setText(
+                "Shizuku: " + ShizukuShell.status + "\n" +
+                "Binder running: " + (ShizukuShell.isRunning() ? "YES" : "NO") + "\n" +
+                "Permission: " + (ShizukuShell.hasPermission() ? "YES" : "NO") + "\n" +
+                "Shell injection success/fail: " + ShizukuShell.injected + " / " + ShizukuShell.failed
+        );
+
         Display x = externalDisplay();
         displayInfo.setText(x == null
                 ? "No external logical display found. Start DeX first."
@@ -211,7 +257,9 @@ public final class MainActivity extends Activity {
                 "Raw: " + TouchBridgeService.rawX + ", " + TouchBridgeService.rawY +
                 " | down=" + TouchBridgeService.down + "\n" +
                 "Mapped: " + Math.round(TouchBridgeService.outX) + ", " + Math.round(TouchBridgeService.outY) + "\n" +
-                "Injected: " + TouchAccessibilityService.injected + "\n" +
+                "Injection route: " + TouchBridgeService.injectionRoute + "\n" +
+                "Shell injected: " + ShizukuShell.injected + " | failed: " + ShizukuShell.failed + "\n" +
+                "Accessibility injected: " + TouchAccessibilityService.injected + "\n" +
                 (TouchBridgeService.error.isEmpty() ? "" : "Error: " + TouchBridgeService.error));
     }
 
