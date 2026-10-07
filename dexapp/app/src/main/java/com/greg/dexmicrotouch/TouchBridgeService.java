@@ -16,19 +16,26 @@ import android.hardware.usb.UsbManager;
 import android.os.IBinder;
 import android.util.DisplayMetrics;
 import android.view.Display;
+import android.view.KeyEvent;
 import android.view.MotionEvent;
 
 import java.util.Locale;
 
 public final class TouchBridgeService extends Service {
     private static final String CHANNEL = "microtouch_bridge";
-    private static final float MOVE_THRESHOLD_PX = 6f;
+    private static final float MOVE_THRESHOLD_PX = 2.5f;
+
+    private static final int EDGE_NONE = 0;
+    private static final int EDGE_LEFT = 1;
+    private static final int EDGE_RIGHT = 2;
+    private static final int EDGE_BOTTOM = 3;
 
     public static volatile String state = "Stopped";
     public static volatile String protocol = "None";
     public static volatile String error = "";
     public static volatile String injectionRoute = "None";
     public static volatile String reportStatus = "--";
+    public static volatile String lastGesture = "--";
     public static volatile long packets = 0;
     public static volatile int rawX = 0;
     public static volatile int rawY = 0;
@@ -193,6 +200,11 @@ public final class TouchBridgeService extends Service {
         float lastSentX = Float.NaN;
         float lastSentY = Float.NaN;
 
+        int edgeMode = EDGE_NONE;
+        float gestureStartX = 0f;
+        float gestureStartY = 0f;
+        long gestureStartTime = 0L;
+
         try {
             while (running && !Thread.currentThread().isInterrupted()) {
                 if (!isDevicePresent(um, dev)
@@ -215,8 +227,6 @@ public final class TouchBridgeService extends Service {
                     int statusByte = buf[1] & 0xff;
                     reportStatus = String.format(Locale.US, "0x%02X", statusByte);
 
-                    // 3M 7-byte Report 1:
-                    // bit 0 = touching, bit 1 = coordinate data valid.
                     if ((statusByte & 0x02) == 0) {
                         continue;
                     }
@@ -253,9 +263,12 @@ public final class TouchBridgeService extends Service {
                 boolean swap = sp.getBoolean("swap", false);
                 boolean invx = sp.getBoolean("invx", false);
                 boolean invy = sp.getBoolean("invy", false);
+                int offsetX = sp.getInt("offsetX", 0);
+                int offsetY = sp.getInt("offsetY", 0);
+                boolean edgeGestures = sp.getBoolean("edgeGestures", true);
 
-                double nx = clamp(x / (double)max);
-                double ny = clamp(y / (double)max);
+                double nx = clamp01(x / (double)max);
+                double ny = clamp01(y / (double)max);
 
                 if (swap) {
                     double q = nx;
@@ -265,11 +278,21 @@ public final class TouchBridgeService extends Service {
                 if (invx) nx = 1.0 - nx;
                 if (invy) ny = 1.0 - ny;
 
-                outX = (float)(nx * Math.max(0, width - 1));
-                outY = (float)(ny * Math.max(0, height - 1));
+                outX = clampPx((float)(nx * Math.max(0, width - 1)) + offsetX, width);
+                outY = clampPx((float)(ny * Math.max(0, height - 1)) + offsetY, height);
 
-                if (pressed && !streamDown) {
-                    // Clean up any stream left behind by a previous crash/reconnect.
+                if (pressed && !streamDown && edgeMode == EDGE_NONE) {
+                    int detectedEdge = edgeGestures ? detectEdge(outX, outY, width, height) : EDGE_NONE;
+
+                    if (detectedEdge != EDGE_NONE) {
+                        edgeMode = detectedEdge;
+                        gestureStartX = outX;
+                        gestureStartY = outY;
+                        gestureStartTime = android.os.SystemClock.uptimeMillis();
+                        ShizukuShell.resetTouch(displayId, outX, outY);
+                        continue;
+                    }
+
                     ShizukuShell.resetTouch(displayId, outX, outY);
 
                     boolean ok = ShizukuShell.inject(
@@ -286,7 +309,12 @@ public final class TouchBridgeService extends Service {
                     lastSentX = outX;
                     lastSentY = outY;
 
-                } else if (pressed) {
+                } else if (pressed && edgeMode != EDGE_NONE) {
+                    // Hold the touch locally until release so the edge gesture
+                    // doesn't drag or click the foreground app.
+                    continue;
+
+                } else if (pressed && streamDown) {
                     float dxp = outX - lastSentX;
                     float dyp = outY - lastSentY;
 
@@ -308,7 +336,20 @@ public final class TouchBridgeService extends Service {
                         lastSentY = outY;
                     }
 
-                } else if (streamDown) {
+                } else if (!pressed && edgeMode != EDGE_NONE) {
+                    performEdgeGesture(
+                            displayId,
+                            edgeMode,
+                            gestureStartX,
+                            gestureStartY,
+                            outX,
+                            outY,
+                            android.os.SystemClock.uptimeMillis() - gestureStartTime);
+
+                    edgeMode = EDGE_NONE;
+                    gestureStartTime = 0L;
+
+                } else if (!pressed && streamDown) {
                     boolean ok = ShizukuShell.inject(
                             displayId,
                             MotionEvent.ACTION_UP,
@@ -336,6 +377,50 @@ public final class TouchBridgeService extends Service {
         }
     }
 
+    private int detectEdge(float x, float y, int width, int height) {
+        float edge = Math.max(34f, Math.min(width, height) * 0.035f);
+
+        if (y >= height - edge) return EDGE_BOTTOM;
+        if (x <= edge) return EDGE_LEFT;
+        if (x >= width - edge) return EDGE_RIGHT;
+        return EDGE_NONE;
+    }
+
+    private void performEdgeGesture(
+            int displayId,
+            int edge,
+            float sx,
+            float sy,
+            float ex,
+            float ey,
+            long durationMs) {
+
+        float dx = ex - sx;
+        float dy = ey - sy;
+        boolean handled = false;
+
+        if (edge == EDGE_LEFT && dx > 80f && Math.abs(dx) > Math.abs(dy) * 0.7f) {
+            handled = ShizukuShell.key(displayId, KeyEvent.KEYCODE_BACK);
+            lastGesture = "Back (left edge)";
+        } else if (edge == EDGE_RIGHT && dx < -80f && Math.abs(dx) > Math.abs(dy) * 0.7f) {
+            handled = ShizukuShell.key(displayId, KeyEvent.KEYCODE_BACK);
+            lastGesture = "Back (right edge)";
+        } else if (edge == EDGE_BOTTOM && dy < -85f) {
+            if (durationMs >= 650L) {
+                handled = ShizukuShell.key(displayId, KeyEvent.KEYCODE_APP_SWITCH);
+                lastGesture = "Recents (bottom hold)";
+            } else {
+                handled = ShizukuShell.key(displayId, KeyEvent.KEYCODE_HOME);
+                lastGesture = "Home (bottom swipe)";
+            }
+        }
+
+        if (!handled) {
+            ShizukuShell.tap(displayId, ex, ey);
+            lastGesture = "Edge tap";
+        }
+    }
+
     private boolean isDevicePresent(UsbManager um, UsbDevice target) {
         UsbDevice found = um.getDeviceList().get(target.getDeviceName());
         return found != null
@@ -348,9 +433,16 @@ public final class TouchBridgeService extends Service {
         return dm.getDisplay(displayId) != null;
     }
 
-    private static double clamp(double v) {
+    private static double clamp01(double v) {
         if (v < 0) return 0;
         if (v > 1) return 1;
+        return v;
+    }
+
+    private static float clampPx(float v, int limit) {
+        if (v < 0f) return 0f;
+        float max = Math.max(0, limit - 1);
+        if (v > max) return max;
         return v;
     }
 
