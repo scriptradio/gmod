@@ -166,4 +166,20 @@ public final class ShizukuShell {
         boolean b = inject(displayId, MotionEvent.ACTION_UP, x, y);
         return a && b;
     }
+
+    public static boolean key(int displayId, int keyCode) {
+        IShellInputService s = service;
+        if (s == null) return false;
+        try {
+            boolean ok = s.key(displayId, keyCode);
+            if (ok) injected++; else failed++;
+            return ok;
+        } catch (Throwable t) {
+            failed++;
+            service = null;
+            binding = false;
+            status = "Shell injector lost";
+            return false;
+        }
+    }
 }
