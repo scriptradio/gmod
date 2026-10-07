@@ -16,6 +16,7 @@ import android.hardware.usb.UsbManager;
 import android.os.IBinder;
 import android.util.DisplayMetrics;
 import android.view.Display;
+import android.view.MotionEvent;
 
 import java.util.Locale;
 
@@ -24,6 +25,7 @@ public final class TouchBridgeService extends Service {
     public static volatile String state = "Stopped";
     public static volatile String protocol = "None";
     public static volatile String error = "";
+    public static volatile String injectionRoute = "None";
     public static volatile long packets = 0;
     public static volatile int rawX = 0, rawY = 0;
     public static volatile boolean down = false;
@@ -36,12 +38,14 @@ public final class TouchBridgeService extends Service {
 
     @Override public void onCreate() {
         super.onCreate();
+        ShizukuShell.init(this);
         NotificationManager nm = (NotificationManager)getSystemService(NOTIFICATION_SERVICE);
         nm.createNotificationChannel(new NotificationChannel(CHANNEL, "DeX touchscreen bridge", NotificationManager.IMPORTANCE_LOW));
         startForeground(77, note("Starting"));
     }
 
     @Override public int onStartCommand(Intent i, int flags, int id) {
+        ShizukuShell.bind();
         if (worker == null || !worker.isAlive()) {
             running = true;
             worker = new Thread(this::runBridge, "MicroTouchBridge");
@@ -55,15 +59,18 @@ public final class TouchBridgeService extends Service {
         if (worker != null) worker.interrupt();
         cleanup();
         state = "Stopped";
+        injectionRoute = "None";
         super.onDestroy();
     }
 
     @Override public IBinder onBind(Intent i) { return null; }
 
     private void runBridge() {
+        boolean lastPressed = false;
         try {
             error = "";
             packets = 0;
+
             UsbManager um = (UsbManager)getSystemService(USB_SERVICE);
             UsbDevice dev = findDevice(um);
             if (dev == null) throw new Exception("No USB device found");
@@ -78,12 +85,16 @@ public final class TouchBridgeService extends Service {
 
             int pid = dev.getProductId();
             boolean ex2 = dev.getVendorId() == 0x0596 && pid == 0x0001;
-            boolean rx = dev.getVendorId() == 0x0596 && pid == 0x0102;
+            boolean rx151 = dev.getVendorId() == 0x0596 && pid == 0x0102;
+            boolean dx = dev.getVendorId() == 0x0596 && pid == 0x0300;
+
             if (ex2) {
                 protocol = "3M EX II / 0596:0001";
                 initEx2(conn);
-            } else if (rx) {
-                protocol = "3M RX151-style HID / 0596:0102";
+            } else if (rx151) {
+                protocol = "3M RX151 HID / 0596:0102";
+            } else if (dx) {
+                protocol = "3M MicroTouch DX / 0596:0300";
             } else {
                 protocol = String.format(Locale.US, "3M/USB fallback %04X:%04X", dev.getVendorId(), pid);
             }
@@ -94,8 +105,6 @@ public final class TouchBridgeService extends Service {
             d.getRealMetrics(m);
             int w = m.widthPixels, h = m.heightPixels;
             int displayId = d.getDisplayId();
-
-            if (!TouchAccessibilityService.ready()) throw new Exception("Accessibility service is not enabled");
 
             SharedPreferences sp = getSharedPreferences("bridge", MODE_PRIVATE);
             boolean swap = sp.getBoolean("swap", false);
@@ -120,7 +129,7 @@ public final class TouchBridgeService extends Service {
                     x = (((buf[3] & 0xff) << 8) | (buf[2] & 0xff)) & 0x03ff;
                     y = (((buf[5] & 0xff) << 8) | (buf[4] & 0xff)) & 0x03ff;
                     max = 1023;
-                    if (!rx) protocol = "RX151-compatible 7-byte Report 1";
+                    if (!rx151 && !dx) protocol = "3M-compatible 7-byte Report 1";
                 } else if (n >= 11 && ex2) {
                     pressed = ((buf[2] & 0xff) & 0x40) != 0;
                     x = ((buf[8] & 0xff) << 8) | (buf[7] & 0xff);
@@ -131,21 +140,54 @@ public final class TouchBridgeService extends Service {
                     continue;
                 }
 
-                rawX = x; rawY = y; down = pressed;
+                rawX = x;
+                rawY = y;
+                down = pressed;
+
                 double nx = clamp(x / (double)max);
                 double ny = clamp(y / (double)max);
                 if (swap) { double q = nx; nx = ny; ny = q; }
                 if (invx) nx = 1.0 - nx;
                 if (invy) ny = 1.0 - ny;
+
                 outX = (float)(nx * Math.max(0, w - 1));
                 outY = (float)(ny * Math.max(0, h - 1));
-                TouchAccessibilityService.inject(displayId, pressed, outX, outY);
+
+                int action = -1;
+                if (pressed && !lastPressed) action = MotionEvent.ACTION_DOWN;
+                else if (pressed) action = MotionEvent.ACTION_MOVE;
+                else if (lastPressed) action = MotionEvent.ACTION_UP;
+
+                if (action != -1) {
+                    boolean shellOk = false;
+                    if (ShizukuShell.ready()) {
+                        shellOk = ShizukuShell.inject(displayId, action, outX, outY);
+                        injectionRoute = shellOk ? "Shizuku shell InputManager" : "Shizuku injection failed";
+                    }
+
+                    if (!shellOk && TouchAccessibilityService.ready()) {
+                        TouchAccessibilityService.inject(displayId, pressed, outX, outY);
+                        injectionRoute = "Accessibility fallback";
+                    } else if (!shellOk && !TouchAccessibilityService.ready()) {
+                        injectionRoute = "Waiting for Shizuku";
+                    }
+                }
+
+                lastPressed = pressed;
             }
         } catch (Throwable t) {
             error = t.getClass().getSimpleName() + ": " + String.valueOf(t.getMessage());
             state = "Error";
             updateNote(error);
         } finally {
+            if (lastPressed) {
+                try {
+                    Display d = externalDisplay();
+                    if (d != null && ShizukuShell.ready()) {
+                        ShizukuShell.inject(d.getDisplayId(), MotionEvent.ACTION_CANCEL, outX, outY);
+                    }
+                } catch (Throwable ignored) {}
+            }
             cleanup();
         }
     }
@@ -204,7 +246,8 @@ public final class TouchBridgeService extends Service {
     private void cleanup() {
         try { if (conn != null && intf != null) conn.releaseInterface(intf); } catch (Exception ignored) {}
         try { if (conn != null) conn.close(); } catch (Exception ignored) {}
-        conn = null; intf = null;
+        conn = null;
+        intf = null;
     }
 
     private Notification note(String s) {
@@ -221,7 +264,8 @@ public final class TouchBridgeService extends Service {
     }
 
     private static final class Pair {
-        final UsbInterface i; final UsbEndpoint e;
+        final UsbInterface i;
+        final UsbEndpoint e;
         Pair(UsbInterface i, UsbEndpoint e) { this.i=i; this.e=e; }
     }
 }
