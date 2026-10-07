@@ -15,13 +15,8 @@ public final class ShellInputUserService extends IShellInputService.Stub {
     private Method setDisplayId;
     private long downTime;
 
-    public ShellInputUserService() {
-        init();
-    }
-
-    public ShellInputUserService(Context context) {
-        init();
-    }
+    public ShellInputUserService() { init(); }
+    public ShellInputUserService(Context context) { init(); }
 
     private void init() {
         try {
@@ -40,45 +35,59 @@ public final class ShellInputUserService extends IShellInputService.Stub {
         }
     }
 
-    @Override
-    public int getUid() {
-        return Process.myUid();
-    }
+    @Override public int getUid() { return Process.myUid(); }
 
     @Override
     public synchronized boolean inject(int displayId, int action, float x, float y) {
         try {
             long now = SystemClock.uptimeMillis();
-            if (action == MotionEvent.ACTION_DOWN || downTime == 0L) {
+
+            if (action == MotionEvent.ACTION_DOWN) {
+                if (downTime != 0L) {
+                    send(displayId, MotionEvent.ACTION_CANCEL, x, y, downTime, now);
+                }
+                downTime = now;
+            } else if ((action == MotionEvent.ACTION_MOVE || action == MotionEvent.ACTION_UP)
+                    && downTime == 0L) {
+                return false;
+            } else if (action == MotionEvent.ACTION_CANCEL && downTime == 0L) {
                 downTime = now;
             }
 
-            MotionEvent event = MotionEvent.obtain(
-                    downTime,
-                    now,
-                    action,
-                    x,
-                    y,
-                    0
-            );
-            event.setSource(InputDevice.SOURCE_TOUCHSCREEN);
-            setDisplayId.invoke(event, displayId);
-
-            Object result = injectInputEvent.invoke(inputManager, event, 0);
-            event.recycle();
+            boolean ok = send(displayId, action, x, y, downTime, now);
 
             if (action == MotionEvent.ACTION_UP || action == MotionEvent.ACTION_CANCEL) {
                 downTime = 0L;
             }
-
-            return result instanceof Boolean && (Boolean) result;
+            return ok;
         } catch (Throwable t) {
+            downTime = 0L;
             return false;
         }
     }
 
     @Override
-    public void destroy() {
-        System.exit(0);
+    public synchronized boolean resetTouch(int displayId, float x, float y) {
+        try {
+            long now = SystemClock.uptimeMillis();
+            long dt = downTime == 0L ? now : downTime;
+            boolean ok = send(displayId, MotionEvent.ACTION_CANCEL, x, y, dt, now);
+            downTime = 0L;
+            return ok;
+        } catch (Throwable t) {
+            downTime = 0L;
+            return false;
+        }
     }
+
+    private boolean send(int displayId, int action, float x, float y, long dt, long now) throws Exception {
+        MotionEvent event = MotionEvent.obtain(dt, now, action, x, y, 0);
+        event.setSource(InputDevice.SOURCE_TOUCHSCREEN);
+        setDisplayId.invoke(event, displayId);
+        Object result = injectInputEvent.invoke(inputManager, event, 0);
+        event.recycle();
+        return result instanceof Boolean && (Boolean) result;
+    }
+
+    @Override public void destroy() { System.exit(0); }
 }
