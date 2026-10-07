@@ -119,7 +119,7 @@ public final class ShizukuShell {
                     .debuggable(false)
                     .daemon(false)
                     .tag("dexmicrotouch-input")
-                    .version(4);
+                    .version(5);
             binding = true;
             status = "Starting shell injector...";
             Shizuku.bindUserService(args, CONNECTION);
