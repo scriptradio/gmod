@@ -48,6 +48,9 @@ public final class MainActivity extends Activity {
                 Toast.makeText(MainActivity.this,
                         ok ? "USB permission granted" : "USB permission denied",
                         Toast.LENGTH_SHORT).show();
+                if (ok && prefs().getBoolean("auto", true)) {
+                    startBridgeServiceIfUsbAuthorized();
+                }
             }
             refresh();
         }
@@ -75,9 +78,6 @@ public final class MainActivity extends Activity {
             requestPermissions(new String[]{Manifest.permission.POST_NOTIFICATIONS}, 4);
         }
 
-        if (prefs().getBoolean("auto", true)) {
-            startBridgeService();
-        }
         refreshDelayed();
     }
 
@@ -100,8 +100,8 @@ public final class MainActivity extends Activity {
         root.setPadding(p,p,p,p);
         sv.addView(root);
 
-        root.addView(t("DeX MicroTouch Bridge v0.4", 24));
-        root.addView(t("Automatic 3M MicroTouch → Samsung DeX bridge. v0.4 fixes finger-up handling and adds background auto-connect.", 15));
+        root.addView(t("DeX MicroTouch Bridge v0.4.1", 24));
+        root.addView(t("Automatic 3M MicroTouch → Samsung DeX bridge. v0.4.1 fixes finger-up handling and adds background auto-connect.", 15));
 
         usbInfo = t("", 14);
         displayInfo = t("", 14);
@@ -115,7 +115,7 @@ public final class MainActivity extends Activity {
         auto.setOnCheckedChangeListener((button, checked) -> {
             prefs().edit().putBoolean("auto", checked).apply();
             if (checked) {
-                startBridgeService();
+                startBridgeServiceIfUsbAuthorized();
                 Toast.makeText(this, "Automatic bridge enabled", Toast.LENGTH_SHORT).show();
             } else {
                 stopService(new Intent(this, TouchBridgeService.class));
@@ -124,7 +124,7 @@ public final class MainActivity extends Activity {
             refreshDelayed();
         });
         root.addView(auto);
-        root.addView(t("For fully automatic USB reconnects, unplug/replug the dock once after installing v0.4 and choose DeX MicroTouch Bridge / Always when Android asks which app should handle the 3M controller.", 13));
+        root.addView(t("For fully automatic USB reconnects, unplug/replug the dock once after installing v0.4.1 and choose DeX MicroTouch Bridge / Always when Android asks which app should handle the 3M controller.", 13));
 
         root.addView(t("\n2. USB touchscreen", 18));
         root.addView(usbInfo);
@@ -209,7 +209,7 @@ public final class MainActivity extends Activity {
         start.setText("START / RECONNECT BRIDGE NOW");
         start.setOnClickListener(v -> {
             ShizukuShell.bind();
-            startBridgeService();
+            startBridgeServiceIfUsbAuthorized();
             refreshDelayed();
         });
         root.addView(start);
@@ -233,11 +233,20 @@ public final class MainActivity extends Activity {
         setContentView(sv);
     }
 
-    private void startBridgeService() {
+    private void startBridgeServiceIfUsbAuthorized() {
+        UsbDevice d = find3M();
+        if (d == null || !usb.hasPermission(d)) {
+            Toast.makeText(this,
+                    "3M USB permission is required before the bridge can start",
+                    Toast.LENGTH_SHORT).show();
+            return;
+        }
+
         try {
             startForegroundService(new Intent(this, TouchBridgeService.class));
         } catch (Throwable t) {
-            Toast.makeText(this, "Could not start bridge: " + t.getClass().getSimpleName(),
+            Toast.makeText(this,
+                    "Could not start bridge: " + t.getClass().getSimpleName(),
                     Toast.LENGTH_LONG).show();
         }
     }
