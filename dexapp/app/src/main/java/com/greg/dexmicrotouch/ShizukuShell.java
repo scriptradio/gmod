@@ -17,6 +17,7 @@ public final class ShizukuShell {
     private static Context app;
     private static volatile IShellInputService service;
     private static boolean initialized;
+    private static boolean binding;
 
     private static final Shizuku.OnBinderReceivedListener BINDER_RECEIVED = () -> {
         status = "Shizuku running";
@@ -25,6 +26,7 @@ public final class ShizukuShell {
 
     private static final Shizuku.OnBinderDeadListener BINDER_DEAD = () -> {
         service = null;
+        binding = false;
         status = "Shizuku stopped";
     };
 
@@ -39,8 +41,8 @@ public final class ShizukuShell {
             };
 
     private static final ServiceConnection CONNECTION = new ServiceConnection() {
-        @Override
-        public void onServiceConnected(ComponentName name, IBinder binder) {
+        @Override public void onServiceConnected(ComponentName name, IBinder binder) {
+            binding = false;
             service = IShellInputService.Stub.asInterface(binder);
             try {
                 status = "Shell injector ready (UID " + service.getUid() + ")";
@@ -49,8 +51,8 @@ public final class ShizukuShell {
             }
         }
 
-        @Override
-        public void onServiceDisconnected(ComponentName name) {
+        @Override public void onServiceDisconnected(ComponentName name) {
+            binding = false;
             service = null;
             status = "Shell injector disconnected";
         }
@@ -59,10 +61,9 @@ public final class ShizukuShell {
     private ShizukuShell() {}
 
     public static synchronized void init(Context context) {
+        app = context.getApplicationContext();
         if (initialized) return;
         initialized = true;
-        app = context.getApplicationContext();
-
         Shizuku.addBinderReceivedListenerSticky(BINDER_RECEIVED);
         Shizuku.addBinderDeadListener(BINDER_DEAD);
         Shizuku.addRequestPermissionResultListener(PERMISSION_RESULT);
@@ -76,11 +77,8 @@ public final class ShizukuShell {
     }
 
     public static boolean isRunning() {
-        try {
-            return Shizuku.pingBinder();
-        } catch (Throwable t) {
-            return false;
-        }
+        try { return Shizuku.pingBinder(); }
+        catch (Throwable t) { return false; }
     }
 
     public static boolean hasPermission() {
@@ -105,14 +103,14 @@ public final class ShizukuShell {
                 return;
             }
             status = "Waiting for Shizuku permission";
-            Shizuku.requestPermission(4403);
+            Shizuku.requestPermission(4404);
         } catch (Throwable t) {
             status = "Shizuku error: " + t.getClass().getSimpleName();
         }
     }
 
     public static synchronized void bind() {
-        if (app == null || service != null) return;
+        if (app == null || service != null || binding) return;
         try {
             if (!hasPermission()) return;
             Shizuku.UserServiceArgs args = new Shizuku.UserServiceArgs(
@@ -121,36 +119,50 @@ public final class ShizukuShell {
                     .debuggable(false)
                     .daemon(false)
                     .tag("dexmicrotouch-input")
-                    .version(3);
+                    .version(4);
+            binding = true;
             status = "Starting shell injector...";
             Shizuku.bindUserService(args, CONNECTION);
         } catch (Throwable t) {
+            binding = false;
             status = "Could not start shell injector: " + t.getClass().getSimpleName();
         }
     }
 
-    public static boolean ready() {
-        return service != null;
-    }
+    public static boolean ready() { return service != null; }
 
     public static boolean inject(int displayId, int action, float x, float y) {
         IShellInputService s = service;
         if (s == null) return false;
         try {
             boolean ok = s.inject(displayId, action, x, y);
-            if (ok) injected++;
-            else failed++;
+            if (ok) injected++; else failed++;
             return ok;
         } catch (Throwable t) {
             failed++;
             service = null;
+            binding = false;
             status = "Shell injector lost";
             return false;
         }
     }
 
+    public static boolean resetTouch(int displayId, float x, float y) {
+        IShellInputService s = service;
+        if (s == null) return false;
+        try {
+            return s.resetTouch(displayId, x, y);
+        } catch (Throwable t) {
+            service = null;
+            binding = false;
+            return false;
+        }
+    }
+
     public static boolean tap(int displayId, float x, float y) {
+        resetTouch(displayId, x, y);
         boolean a = inject(displayId, MotionEvent.ACTION_DOWN, x, y);
+        try { Thread.sleep(35); } catch (InterruptedException ignored) {}
         boolean b = inject(displayId, MotionEvent.ACTION_UP, x, y);
         return a && b;
     }
