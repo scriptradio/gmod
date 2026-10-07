@@ -1,0 +1,7 @@
+package com.greg.dexmicrotouch;
+
+interface IShellInputService {
+    void destroy() = 16777114;
+    int getUid() = 1;
+    boolean inject(int displayId, int action, float x, float y) = 2;
+}
