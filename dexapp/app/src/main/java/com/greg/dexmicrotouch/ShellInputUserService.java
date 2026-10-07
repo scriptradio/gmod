@@ -5,6 +5,8 @@ import android.os.Process;
 import android.os.SystemClock;
 import android.view.InputDevice;
 import android.view.InputEvent;
+import android.view.KeyCharacterMap;
+import android.view.KeyEvent;
 import android.view.MotionEvent;
 
 import java.lang.reflect.Method;
@@ -12,7 +14,7 @@ import java.lang.reflect.Method;
 public final class ShellInputUserService extends IShellInputService.Stub {
     private Object inputManager;
     private Method injectInputEvent;
-    private Method setDisplayId;
+    private Method setInputEventDisplayId;
     private long downTime;
 
     public ShellInputUserService() { init(); }
@@ -28,8 +30,8 @@ public final class ShellInputUserService extends IShellInputService.Stub {
             injectInputEvent = im.getDeclaredMethod("injectInputEvent", InputEvent.class, int.class);
             injectInputEvent.setAccessible(true);
 
-            setDisplayId = MotionEvent.class.getDeclaredMethod("setDisplayId", int.class);
-            setDisplayId.setAccessible(true);
+            setInputEventDisplayId = InputEvent.class.getDeclaredMethod("setDisplayId", int.class);
+            setInputEventDisplayId.setAccessible(true);
         } catch (Throwable t) {
             throw new RuntimeException("Input injector init failed", t);
         }
@@ -44,7 +46,7 @@ public final class ShellInputUserService extends IShellInputService.Stub {
 
             if (action == MotionEvent.ACTION_DOWN) {
                 if (downTime != 0L) {
-                    send(displayId, MotionEvent.ACTION_CANCEL, x, y, downTime, now);
+                    sendMotion(displayId, MotionEvent.ACTION_CANCEL, x, y, downTime, now);
                 }
                 downTime = now;
             } else if ((action == MotionEvent.ACTION_MOVE || action == MotionEvent.ACTION_UP)
@@ -54,7 +56,7 @@ public final class ShellInputUserService extends IShellInputService.Stub {
                 downTime = now;
             }
 
-            boolean ok = send(displayId, action, x, y, downTime, now);
+            boolean ok = sendMotion(displayId, action, x, y, downTime, now);
 
             if (action == MotionEvent.ACTION_UP || action == MotionEvent.ACTION_CANCEL) {
                 downTime = 0L;
@@ -71,7 +73,7 @@ public final class ShellInputUserService extends IShellInputService.Stub {
         try {
             long now = SystemClock.uptimeMillis();
             long dt = downTime == 0L ? now : downTime;
-            boolean ok = send(displayId, MotionEvent.ACTION_CANCEL, x, y, dt, now);
+            boolean ok = sendMotion(displayId, MotionEvent.ACTION_CANCEL, x, y, dt, now);
             downTime = 0L;
             return ok;
         } catch (Throwable t) {
@@ -80,10 +82,31 @@ public final class ShellInputUserService extends IShellInputService.Stub {
         }
     }
 
-    private boolean send(int displayId, int action, float x, float y, long dt, long now) throws Exception {
+    @Override
+    public synchronized boolean key(int displayId, int keyCode) {
+        try {
+            long now = SystemClock.uptimeMillis();
+            KeyEvent down = new KeyEvent(
+                    now, now, KeyEvent.ACTION_DOWN, keyCode, 0, 0,
+                    KeyCharacterMap.VIRTUAL_KEYBOARD, 0,
+                    KeyEvent.FLAG_FROM_SYSTEM, InputDevice.SOURCE_KEYBOARD);
+            KeyEvent up = KeyEvent.changeAction(down, KeyEvent.ACTION_UP);
+
+            setInputEventDisplayId.invoke(down, displayId);
+            setInputEventDisplayId.invoke(up, displayId);
+
+            boolean a = Boolean.TRUE.equals(injectInputEvent.invoke(inputManager, down, 0));
+            boolean b = Boolean.TRUE.equals(injectInputEvent.invoke(inputManager, up, 0));
+            return a && b;
+        } catch (Throwable t) {
+            return false;
+        }
+    }
+
+    private boolean sendMotion(int displayId, int action, float x, float y, long dt, long now) throws Exception {
         MotionEvent event = MotionEvent.obtain(dt, now, action, x, y, 0);
         event.setSource(InputDevice.SOURCE_TOUCHSCREEN);
-        setDisplayId.invoke(event, displayId);
+        setInputEventDisplayId.invoke(event, displayId);
         Object result = injectInputEvent.invoke(inputManager, event, 0);
         event.recycle();
         return result instanceof Boolean && (Boolean) result;
